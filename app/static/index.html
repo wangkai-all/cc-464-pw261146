@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>增量物化视图维护控制台</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">MV</span>
+    <div>
+      <h1>增量物化视图维护</h1>
+      <p class="sub">分区级回补 · 版本水位 · 原子切换 · 中断恢复</p>
+    </div>
+  </div>
+  <div class="top-actions">
+    <span id="conn" class="pill ok">在线</span>
+    <button id="toggle-auto" class="ghost">自动刷新：开</button>
+    <button id="reset" class="ghost danger">重置演示</button>
+  </div>
+</header>
+
+<section class="metrics" id="metrics">
+  <div class="metric">
+    <span class="label">已提交视图版本</span>
+    <strong id="m-version">—</strong>
+    <small id="m-updated">—</small>
+  </div>
+  <div class="metric">
+    <span class="label">已物化水位 (fact_seq)</span>
+    <strong id="m-watermark">—</strong>
+    <small id="m-factwater">事实流 —</small>
+  </div>
+  <div class="metric">
+    <span class="label">待回补分区</span>
+    <strong id="m-pending">—</strong>
+    <small id="m-range">—</small>
+  </div>
+  <div class="metric">
+    <span class="label">维护锁</span>
+    <strong id="m-lock">空闲</strong>
+    <small id="m-lockdetail">无并发任务</small>
+  </div>
+</section>
+
+<main class="grid">
+  <section class="card span-1">
+    <h2>事实写入 <span class="hint">底层支持迟到更新 / 删除 / 跨分区移动</span></h2>
+    <div class="actions">
+      <button data-action="seed">生成示例事实</button>
+      <button data-action="late_update">迟到更新</button>
+      <button data-action="late_delete">迟到删除</button>
+      <button data-action="move_day">跨天移动</button>
+      <button data-action="new_partition">新增分区</button>
+    </div>
+    <form id="fact-form" class="fact-form">
+      <div class="row">
+        <label>键 <input name="key" placeholder="2026-11-01-000" required /></label>
+        <label>类别 <input name="category" placeholder="books" /></label>
+      </div>
+      <div class="row">
+        <label>金额 <input name="value" type="number" step="0.01" placeholder="42.5" /></label>
+        <label>发生时间 <input name="occurred_at" placeholder="2026-11-01T10:00:00+00:00" /></label>
+      </div>
+      <div class="row">
+        <label class="inline"><input type="checkbox" name="op" value="delete" /> 删除该键</label>
+        <button type="submit">写入事实</button>
+      </div>
+    </form>
+    <pre id="fact-out" class="out muted">等待操作…</pre>
+  </section>
+
+  <section class="card span-1">
+    <h2>维护任务 <span class="hint">版本、水位、重试、并发锁</span></h2>
+    <div class="actions">
+      <button data-action="trigger" class="primary">触发增量回补</button>
+      <button data-action="run">执行队首任务</button>
+      <button data-action="crash">模拟中断后执行</button>
+      <button data-action="resume">恢复中断任务</button>
+      <button data-action="release">释放锁</button>
+    </div>
+    <div class="options">
+      <label>最大尝试 <input id="opt-attempts" type="number" value="3" min="1" max="9" /></label>
+      <label>每分区延迟(ms) <input id="opt-slow" type="number" value="0" min="0" max="2000" step="50" /></label>
+      <label>崩溃前缀分区数 <input id="opt-crash" type="number" value="2" min="0" max="50" /></label>
+      <label>失败注入分区 <input id="opt-fail" placeholder="2026-11-02" /></label>
+      <label>失败注入次数 <input id="opt-failn" type="number" value="0" min="0" max="9" /></label>
+    </div>
+    <pre id="maint-out" class="out muted">等待操作…</pre>
+  </section>
+
+  <section class="card span-2">
+    <h2>查询结果 <span class="hint">回补期间可见完整旧版本或新版本</span></h2>
+    <div class="query-bar">
+      <label>固定版本 <input id="q-version" type="number" min="1" placeholder="当前" /></label>
+      <label>日期过滤 <input id="q-day" placeholder="2026-11-02" /></label>
+      <button id="q-run">查询</button>
+      <button id="q-live" class="ghost">实时跟随</button>
+      <button id="q-verify" class="ghost">校验一致性</button>
+      <span id="q-badge" class="pill neutral">—</span>
+    </div>
+    <div class="table-wrap">
+      <table id="view-table">
+        <thead>
+          <tr><th>分区日期</th><th>分区代际</th><th>订单数</th><th>金额</th><th>类别明细</th></tr>
+        </thead>
+        <tbody></tbody>
+        <tfoot><tr><th>合计</th><th></th><th id="v-total-cnt">0</th><th id="v-total-amt">0</th><th></th></tr></tfoot>
+      </table>
+    </div>
+    <pre id="verify-out" class="out muted hidden">尚未校验</pre>
+  </section>
+
+  <section class="card span-1">
+    <h2>待回补分区</h2>
+    <div class="table-wrap">
+      <table id="pending-table">
+        <thead><tr><th>日期</th><th>seq 下界</th><th>seq 上界</th><th>标记时间</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="hint">回补只处理这些分区；同一视图未受影响的分区不重算。</p>
+  </section>
+
+  <section class="card span-1">
+    <h2>分区代际</h2>
+    <div class="table-wrap">
+      <table id="gen-table">
+        <thead><tr><th>日期</th><th>版本</th><th>水位</th><th>行数</th><th>校验和</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="hint">保留最近两代，便于慢查询继续读取旧版本。</p>
+  </section>
+
+  <section class="card span-2">
+    <h2>任务历史 <span class="hint">点击行查看事件</span></h2>
+    <div class="table-wrap">
+      <table id="jobs-table">
+        <thead>
+          <tr><th>任务</th><th>状态</th><th>版本</th><th>水位</th><th>尝试</th><th>分区</th><th>耗时</th><th>切换结果</th><th>操作</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card span-2">
+    <h2>任务事件 <span id="event-job" class="hint">—</span></h2>
+    <ol id="events" class="timeline"></ol>
+  </section>
+</main>
+
+<footer class="foot">增量物化视图维护引擎 · SQLite WAL · <span id="clock"></span></footer>
+<script src="/static/app.js"></script>
+</body>
+</html>
